@@ -1,189 +1,192 @@
-// Solmar: the HUD. DOM panels (wanted stars, health, cash, ammo, objective,
-// speed, feed, banner, hint) and a live minimap canvas drawn top-down from
-// the city streets, the cars, the police and the mission marker.
-import { WORLD } from './config.js';
+// Solmar — the HUD: health, cash, ammo, wanted stars, mission objective,
+// toasts, damage flash, arrest meter and the minimap. The minimap is a
+// 2D canvas redrawn every frame from the live world snapshot main.js
+// hands it; nothing here owns game state.
 
-export function createHud() {
-  const $ = (id) => document.getElementById(id);
-  const hud = $('hud');
-  const starsEl = $('stars');
-  const healthFill = $('healthFill');
-  const cashEl = $('cash');
-  const ammoEl = $('ammo');
-  const objName = $('objName');
-  const objText = $('objText');
-  const feedEl = $('feed');
-  const speedNum = $('speedNum');
-  const speedBox = $('speed');
-  const crosshair = $('crosshair');
-  const banner = $('banner');
-  const bannerBig = $('bannerBig');
-  const bannerSub = $('bannerSub');
-  const hintEl = $('hint');
-  const map = $('minimap');
+import { CITY, BEACH_Z0, SEA_Z0, DOCKS_X0, STREETS } from './config.js';
+
+export function createHud(doc) {
+  const el = (id) => doc.getElementById(id);
+  const healthFill = el('healthFill');
+  const cashEl = el('cash');
+  const ammoEl = el('ammo');
+  const weaponEl = el('weapon');
+  const starsEl = el('stars');
+  const objectiveEl = el('objective');
+  const toastEl = el('toast');
+  const flashEl = el('damageFlash');
+  const arrestWrap = el('arrestWrap');
+  const arrestFill = el('arrestFill');
+  const speedoEl = el('speedo');
+  const crosshair = el('crosshair');
+  const map = el('minimap');
   const mapCtx = map.getContext('2d');
-  let bannerTimer = 0;
-  let feedCount = 0;
 
-  function show() { hud.classList.add('on'); }
-  function hide() { hud.classList.remove('on'); }
+  let toastTimer = 0;
+  let flash = 0;
+  const toastQueue = [];
 
-  function addFeed(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    feedEl.prepend(div);
-    feedCount += 1;
-    while (feedEl.children.length > 4) feedEl.removeChild(feedEl.lastChild);
-    setTimeout(() => { if (div.parentNode) div.parentNode.removeChild(div); }, 9000);
+  function toast(text) {
+    toastQueue.push(text);
+    if (toastQueue.length === 1) showNextToast();
   }
 
-  function showBanner(big, sub, ms) {
-    bannerBig.textContent = big;
-    bannerSub.textContent = sub || '';
-    banner.classList.add('on');
-    bannerTimer = (ms || 2600) / 1000;
-  }
-
-  function showHint(text) {
-    if (text) {
-      hintEl.textContent = text;
-      hintEl.classList.add('on');
-    } else {
-      hintEl.classList.remove('on');
+  function showNextToast() {
+    const text = toastQueue[0];
+    if (!text) {
+      toastEl.textContent = '';
+      toastEl.classList.remove('on');
+      return;
     }
+    toastEl.textContent = text;
+    toastEl.classList.add('on');
+    toastTimer = 4;
+  }
+
+  function flashDamage() {
+    flash = 0.55;
+  }
+
+  // screen name -> overlay id (paused maps to pauseScreen, not pausedScreen)
+  const SCREENS = { title: 'titleScreen', paused: 'pauseScreen', busted: 'bustedScreen', wasted: 'wastedScreen' };
+  function showScreen(name) {
+    for (const [key, id] of Object.entries(SCREENS)) {
+      el(id)?.classList.toggle('on', key === name);
+    }
+    el('hud')?.classList.toggle('on', name === 'play');
   }
 
   function drawMinimap(s) {
     const W = map.width;
     const H = map.height;
-    const minX = -WORLD.half - 30;
-    const maxX = WORLD.half + 90; // docks to the east
-    const minZ = -WORLD.half - 30;
-    const maxZ = WORLD.beachAt + 110; // sea to the south
-    const sx = W / (maxX - minX);
-    const sz = H / (maxZ - minZ);
-    const X = (x) => (x - minX) * sx;
-    const Z = (z) => (z - minZ) * sz;
-    // base
-    mapCtx.fillStyle = '#12283a';
+    const range = 340; // world units shown across the map
+    const toMap = (x, z) => [((x + range) / (range * 2)) * W, ((z + range) / (range * 2)) * H];
+    mapCtx.fillStyle = '#101418';
     mapCtx.fillRect(0, 0, W, H);
-    // sea
-    mapCtx.fillStyle = '#0e5d7d';
-    mapCtx.fillRect(0, Z(WORLD.beachAt), W, H - Z(WORLD.beachAt));
-    // sand
-    mapCtx.fillStyle = '#c9a86a';
-    mapCtx.fillRect(0, Z(WORLD.beachAt - 4), W, Z(WORLD.beachAt) - Z(WORLD.beachAt - 4));
-    // land
-    mapCtx.fillStyle = '#2c3a2e';
-    mapCtx.fillRect(0, 0, W, Z(WORLD.beachAt));
+    // sea (south) + beach
+    const [, seaY] = toMap(0, SEA_Z0);
+    mapCtx.fillStyle = '#1e7fa8';
+    mapCtx.fillRect(0, seaY, W, H - seaY);
+    const [, beachY] = toMap(0, BEACH_Z0);
+    mapCtx.fillStyle = '#e8d29a';
+    mapCtx.fillRect(0, beachY, W, seaY - beachY);
+    // docks (east)
+    const [dockX] = toMap(DOCKS_X0, 0);
+    mapCtx.fillStyle = '#9a9a92';
+    mapCtx.fillRect(dockX, 0, W - dockX, beachY);
     // blocks
-    mapCtx.fillStyle = '#3a4a3e';
-    const pitch = WORLD.pitch;
-    for (let i = 0; i < WORLD.grid; i += 1) {
-      for (let j = 0; j < WORLD.grid; j += 1) {
-        const x0 = -WORLD.half + WORLD.road + i * pitch;
-        const z0 = -WORLD.half + WORLD.road + j * pitch;
-        mapCtx.fillRect(X(x0), Z(z0), WORLD.block * sx, WORLD.block * sz);
+    mapCtx.fillStyle = '#3a3f46';
+    for (let i = 0; i < 7; i++) {
+      for (let j = 0; j < 7; j++) {
+        const [x0, z0] = toMap(STREETS[i] + 7, STREETS[j] + 7);
+        const [x1, z1] = toMap(STREETS[i + 1] - 7, STREETS[j + 1] - 7);
+        mapCtx.fillRect(x0, z0, x1 - x0, z1 - z0);
       }
     }
-    // roads
-    mapCtx.fillStyle = '#20242c';
-    for (const st of s.streets) {
-      mapCtx.fillRect(0, Z(st - WORLD.road / 2), W, WORLD.road * sz);
-      mapCtx.fillRect(X(st - WORLD.road / 2), 0, WORLD.road * sx, H);
-    }
-    // docks
-    mapCtx.fillStyle = '#6a5232';
-    mapCtx.fillRect(X(WORLD.half + 4), Z(0), 52 * sx, 80 * sz);
-    // mission marker
-    if (s.marker) {
-      const pulse = 6 + Math.sin(s.time * 4) * 2;
-      mapCtx.fillStyle = '#ffd75e';
+    // streets
+    mapCtx.strokeStyle = '#6a7078';
+    mapCtx.lineWidth = 2;
+    for (const s of STREETS) {
+      const [x] = toMap(s, 0);
+      const [, z] = toMap(0, s);
       mapCtx.beginPath();
-      mapCtx.arc(X(s.marker.x), Z(s.marker.z), pulse, 0, Math.PI * 2);
-      mapCtx.fill();
-      mapCtx.strokeStyle = '#fff';
-      mapCtx.lineWidth = 2;
+      mapCtx.moveTo(x, 0);
+      mapCtx.lineTo(x, H);
+      mapCtx.stroke();
       mapCtx.beginPath();
-      mapCtx.arc(X(s.marker.x), Z(s.marker.z), pulse + 5, 0, Math.PI * 2);
+      mapCtx.moveTo(0, z);
+      mapCtx.lineTo(W, z);
       mapCtx.stroke();
     }
-    // traffic
-    mapCtx.fillStyle = '#f1c40f';
-    for (const c of s.traffic) {
-      mapCtx.fillRect(X(c.x) - 2, Z(c.z) - 2, 4, 4);
-    }
-    // gang
-    mapCtx.fillStyle = '#ff4040';
-    for (const g of s.gang) {
-      if (!g.down) mapCtx.fillRect(X(g.x) - 2, Z(g.z) - 2, 4, 4);
-    }
-    // police (flashing)
-    const flash = Math.floor(s.time * 4) % 2 === 0;
-    mapCtx.fillStyle = flash ? '#4da6ff' : '#ff4040';
-    for (const c of s.police) {
+    // marker (mission / taxi)
+    if (s.marker) {
+      const [mx, my] = toMap(s.marker.x, s.marker.z);
+      mapCtx.fillStyle = '#ffd24a';
       mapCtx.beginPath();
-      mapCtx.arc(X(c.x), Z(c.z), 4, 0, Math.PI * 2);
+      mapCtx.moveTo(mx, my - 6);
+      mapCtx.lineTo(mx + 5, my);
+      mapCtx.lineTo(mx, my + 6);
+      mapCtx.lineTo(mx - 5, my);
+      mapCtx.closePath();
       mapCtx.fill();
     }
-    // player arrow: drawn pointing down (+z on the map); rotate by -heading
-    // so it points along the player's forward direction.
+    // traffic + parked cars
+    mapCtx.fillStyle = '#c8c8c8';
+    for (const c of s.cars || []) {
+      const [cx, cy] = toMap(c.x, c.z);
+      mapCtx.fillRect(cx - 1.5, cy - 1.5, 3, 3);
+    }
+    // enemies
+    mapCtx.fillStyle = '#ff4040';
+    for (const e of s.enemies || []) {
+      const [ex, ey] = toMap(e.x, e.z);
+      mapCtx.beginPath();
+      mapCtx.arc(ex, ey, 3, 0, Math.PI * 2);
+      mapCtx.fill();
+    }
+    // police (flashing)
+    const blink = Math.floor(performance.now() / 300) % 2 === 0;
+    mapCtx.fillStyle = blink ? '#ff3030' : '#3060ff';
+    for (const p of s.police || []) {
+      const [px, py] = toMap(p.x, p.z);
+      mapCtx.beginPath();
+      mapCtx.arc(px, py, 3.5, 0, Math.PI * 2);
+      mapCtx.fill();
+    }
+    // player arrow: the map's y grows south like world z, so a heading of
+    // θ points along (sin θ, cos θ) on the map; an up-drawn arrow rotated
+    // by (π − θ) points exactly there.
+    const [px, py] = toMap(s.px, s.pz);
     mapCtx.save();
-    mapCtx.translate(X(s.px), Z(s.pz));
-    mapCtx.rotate(-s.heading);
+    mapCtx.translate(px, py);
+    mapCtx.rotate(-s.heading + Math.PI);
     mapCtx.fillStyle = '#ffffff';
     mapCtx.beginPath();
-    mapCtx.moveTo(0, 9);
-    mapCtx.lineTo(-6, -6);
-    mapCtx.lineTo(6, -6);
+    mapCtx.moveTo(0, -7);
+    mapCtx.lineTo(5, 5);
+    mapCtx.lineTo(0, 2);
+    mapCtx.lineTo(-5, 5);
     mapCtx.closePath();
     mapCtx.fill();
     mapCtx.restore();
-    // view cone
-    mapCtx.strokeStyle = 'rgba(255,255,255,0.5)';
-    mapCtx.lineWidth = 1;
-    mapCtx.beginPath();
-    mapCtx.arc(X(s.px), Z(s.pz), 14, 0, Math.PI * 2);
-    mapCtx.stroke();
+    void CITY;
   }
 
-  return {
-    show,
-    hide,
-    addFeed,
-    showBanner,
-    showHint,
-    update(dt, s) {
-      if (bannerTimer > 0) {
-        bannerTimer -= dt;
-        if (bannerTimer <= 0) banner.classList.remove('on');
+  function update(dt, s) {
+    // toasts
+    if (toastTimer > 0) {
+      toastTimer -= dt;
+      if (toastTimer <= 0) {
+        toastQueue.shift();
+        showNextToast();
       }
-      // stars
-      let starHtml = '';
-      for (let i = 0; i < 5; i += 1) {
-        starHtml += i < s.stars ? '★' : '<span class="off">★</span>';
-      }
-      starsEl.innerHTML = starHtml;
-      // health
-      healthFill.style.width = `${Math.max(0, s.health)}%`;
-      healthFill.style.background = s.health > 50
-        ? 'linear-gradient(90deg,#37d67a,#a8e063)'
-        : s.health > 25 ? 'linear-gradient(90deg,#f0a830,#ffd75e)' : 'linear-gradient(90deg,#e5484d,#ff7a7a)';
-      cashEl.innerHTML = `$${s.cash.toLocaleString('en-US')} <small>CASH</small>`;
-      ammoEl.textContent = s.inCar ? '🚗 ' + (s.carName || 'Stolen ride') : (s.reloading ? 'Reloading…' : `🔫 Pistol ${s.ammo}/12  •  F punch`);
-      objName.textContent = s.missionName || 'SOLMAR — FREE ROAM';
-      objText.textContent = s.missionText || 'Explore the city. Fares appear on the map — pick one up for $80.';
-      if (s.missionTimer !== null && s.missionTimer !== undefined) {
-        objText.textContent += `  ⏱ ${Math.max(0, Math.ceil(s.missionTimer))}s`;
-      }
-      if (s.inCar) {
-        speedBox.style.display = 'block';
-        speedNum.textContent = Math.round(Math.abs(s.speed) * 3.6);
-      } else {
-        speedBox.style.display = 'none';
-      }
-      crosshair.classList.toggle('on', !s.inCar && s.armed);
-      drawMinimap(s);
-    },
-  };
+    }
+    // damage flash decay
+    if (flash > 0) {
+      flash = Math.max(0, flash - dt * 1.4);
+      flashEl.style.opacity = String(flash);
+    } else {
+      flashEl.style.opacity = '0';
+    }
+    healthFill.style.width = `${Math.max(0, s.health)}%`;
+    healthFill.style.background = s.health > 50 ? '#4ac85c' : s.health > 25 ? '#e8a82e' : '#d83a2e';
+    cashEl.textContent = `$${s.cash}`;
+    ammoEl.textContent = s.weapon === 'pistol' ? `Ammo ${s.ammo}` : 'Fists';
+    weaponEl.textContent = s.weapon === 'pistol' ? 'Pistol [Q]' : 'Fists [Q]';
+    starsEl.textContent = '★'.repeat(s.stars) + '☆'.repeat(5 - s.stars);
+    starsEl.classList.toggle('hot', s.stars > 0);
+    objectiveEl.textContent = s.objective || '';
+    speedoEl.textContent = s.inCar ? `${Math.round(s.speed * 3.6)} km/h` : '';
+    speedoEl.classList.toggle('on', s.inCar);
+    crosshair.classList.toggle('on', !s.inCar && s.weapon === 'pistol');
+    if (s.arrest > 0.02) {
+      arrestWrap.classList.add('on');
+      arrestFill.style.width = `${Math.round(s.arrest * 100)}%`;
+    } else {
+      arrestWrap.classList.remove('on');
+    }
+    drawMinimap(s);
+  }
+
+  return { update, toast, flashDamage, showScreen };
 }

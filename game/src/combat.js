@@ -1,220 +1,217 @@
-// Solmar: combat. The player's fists and pistol, gang members who fight
-// back, and the player's health. Shooting is a cone test from the camera:
-// the nearest gang member, pedestrian or car inside a narrow cone takes the
-// hit. Every shot in the city is heard — it adds wanted heat.
+// Solmar — combat: bullets, punches and the rival gangsters the missions
+// send at Vic. Bullets are short-lived tracers; hits are plain distance
+// checks against peds, enemies, the player and building boxes.
+
 import * as THREE from 'three';
-import { clamp } from './rng.js';
+import { PLAYER } from './config.js';
+import { pointInBoxes } from './collide.js';
 
-const GANG_SHIRTS = [0x8a1f1f, 0x5a1f6e, 0x1f3a5f];
+const BULLET_SPEED = 70;
+const BULLET_LIFE = 1.2;
 
-function createGangMesh() {
-  const group = new THREE.Group();
-  const body = new THREE.Mesh(
-    new THREE.BoxGeometry(0.6, 0.8, 0.34),
-    new THREE.MeshLambertMaterial({ color: GANG_SHIRTS[Math.floor(Math.random() * GANG_SHIRTS.length)] }),
-  );
-  body.position.y = 1.05;
-  body.castShadow = true;
-  group.add(body);
-  const head = new THREE.Mesh(
-    new THREE.SphereGeometry(0.22, 10, 8),
-    new THREE.MeshLambertMaterial({ color: 0xc68642 }),
-  );
-  head.position.y = 1.62;
-  group.add(head);
-  // red bandana
-  const band = new THREE.Mesh(
-    new THREE.BoxGeometry(0.46, 0.1, 0.46),
-    new THREE.MeshLambertMaterial({ color: 0xd21f1f }),
-  );
-  band.position.y = 1.72;
-  group.add(band);
-  const legMat = new THREE.MeshLambertMaterial({ color: 0x1a1a1a });
-  const legL = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.7, 0.2), legMat);
-  legL.position.set(-0.14, 0.35, 0);
-  const legR = legL.clone();
-  legR.position.set(0.14, 0.35, 0);
-  group.add(legL, legR);
-  return { group, legL, legR };
-}
+export function createCombat(scene, ctx) {
+  const bullets = [];
+  const enemies = [];
+  const tracerGeo = new THREE.BoxGeometry(0.07, 0.07, 0.7);
+  const tracerMat = new THREE.MeshBasicMaterial({ color: 0xffe08a });
 
-export function createCombat(scene, peds, audio, fx) {
-  const gang = [];
-  let health = 100;
-  let ammo = 12;
-  let reloading = 0;
-  let punchCd = 0;
-  let shootCd = 0;
-  let lastDamageAt = -999;
-  let time = 0;
-  let onEvent = () => {};
-
-  function spawnGang(x, z, count) {
-    for (let i = 0; i < count; i += 1) {
-      const gx = x + (Math.random() - 0.5) * 14;
-      const gz = z + (Math.random() - 0.5) * 14;
-      const { group, legL, legR } = createGangMesh();
-      group.position.set(gx, 0, gz);
-      scene.add(group);
-      gang.push({
-        mesh: group, legL, legR,
-        x: gx, z: gz, heading: 0, hp: 100, speed: 3.4,
-        attackCd: 0, down: false, phase: Math.random() * 6,
-      });
-    }
+  function spawnBullet(x, y, z, dir, damage, owner) {
+    const mesh = new THREE.Mesh(tracerGeo, tracerMat);
+    mesh.position.set(x, y, z);
+    mesh.lookAt(x + dir.x, y + dir.y, z + dir.z);
+    scene.add(mesh);
+    bullets.push({ mesh, x, y, z, dx: dir.x, dy: dir.y, dz: dir.z, damage, owner, life: BULLET_LIFE });
   }
 
-  function coneHit(origin, dir, targets, maxDist, radius) {
-    let best = null;
-    let bestT = maxDist;
-    for (const t of targets) {
-      if (t.down) continue;
-      const dx = t.x - origin.x;
-      const dz = t.z - origin.z;
-      const along = dx * dir.x + dz * dir.z;
-      if (along < 0.5 || along > bestT) continue;
-      const perp = Math.abs(-dx * dir.z + dz * dir.x);
-      if (perp < radius + along * 0.03) { best = t; bestT = along; }
-    }
-    return best ? { target: best, dist: bestT } : null;
+  function shootFromPlayer(player, dir) {
+    const ox = player.x + Math.sin(player.heading) * 0.6;
+    const oz = player.z + Math.cos(player.heading) * 0.6;
+    spawnBullet(ox, 1.45, oz, dir, PLAYER.pistolDamage, 'player');
+    ctx.peds.scare(player.x, player.z, 40);
+    ctx.wanted.onShotFired();
   }
 
-  function shoot(origin, dir, vehicles) {
-    if (shootCd > 0 || reloading > 0) return 'busy';
-    if (ammo <= 0) {
-      audio.denied();
-      return 'empty';
-    }
-    ammo -= 1;
-    shootCd = 0.22;
-    audio.shoot();
-    fx.burst(origin.x + dir.x * 1.2, 1.5, origin.z + dir.z * 1.2, 0xffd75e, 6, 2);
-    const gangHit = coneHit(origin, dir, gang, 70, 0.9);
-    if (gangHit) {
-      gangHit.target.hp -= 34;
-      fx.burst(gangHit.target.x, 1.4, gangHit.target.z, 0xff4040, 10, 3);
-      if (gangHit.target.hp <= 0) {
-        gangHit.target.down = true;
-        gangHit.target.mesh.rotation.x = -Math.PI / 2;
-        gangHit.target.mesh.position.y = 0.3;
-        onEvent('gangDown', { x: gangHit.target.x, z: gangHit.target.z });
-      }
-      return 'gang';
-    }
-    const ped = peds.hitByShot(origin, dir, 70);
+  function shootFromEnemy(enemy) {
+    const p = ctx.player;
+    const dx = p.x - enemy.x;
+    const dz = p.z - enemy.z;
+    const dist = Math.hypot(dx, dz) || 1;
+    // enemies are bad shots at range
+    const spread = Math.min(0.25, 4 / dist);
+    const dir = {
+      x: dx / dist + (Math.random() - 0.5) * spread,
+      y: (1.35 - 1.4) / dist,
+      z: dz / dist + (Math.random() - 0.5) * spread,
+    };
+    const len = Math.hypot(dir.x, dir.y, dir.z);
+    dir.x /= len;
+    dir.y /= len;
+    dir.z /= len;
+    spawnBullet(enemy.x, 1.4, enemy.z, dir, 12, 'enemy');
+    ctx.audio?.enemyShot();
+  }
+
+  function punch(player) {
+    const range = PLAYER.punchRange;
+    const fx = Math.sin(player.heading);
+    const fz = Math.cos(player.heading);
+    // peds first
+    const ped = ctx.peds.nearest(player.x, player.z, range);
     if (ped) {
-      onEvent('pedShot', { x: ped.x, z: ped.z });
-      return 'ped';
-    }
-    // cars: a shot that clips a car sparks off it
-    const cars = [...vehicles.traffic, ...vehicles.police, ...vehicles.parked];
-    if (vehicles.playerCar) cars.push(vehicles.playerCar);
-    const carHit = coneHit(origin, dir, cars, 70, 1.6);
-    if (carHit) {
-      fx.burst(carHit.target.x, 1, carHit.target.z, 0xffc040, 8, 3);
-      onEvent('carShot', { police: carHit.target.isPolice });
-      return 'car';
-    }
-    return 'miss';
-  }
-
-  function punch(playerX, playerZ, heading) {
-    if (punchCd > 0) return null;
-    punchCd = 0.4;
-    audio.punch();
-    const dirX = Math.sin(heading);
-    const dirZ = Math.cos(heading);
-    let hit = null;
-    for (const g of gang) {
-      if (g.down) continue;
-      const dx = g.x - playerX;
-      const dz = g.z - playerZ;
-      const d = Math.hypot(dx, dz);
-      if (d < 2.3 && (dx * dirX + dz * dirZ) / (d || 1) > 0.3) {
-        g.hp -= 25;
-        fx.burst(g.x, 1.4, g.z, 0xffd75e, 8, 3);
-        if (g.hp <= 0) {
-          g.down = true;
-          g.mesh.rotation.x = -Math.PI / 2;
-          g.mesh.position.y = 0.3;
-          onEvent('gangDown', { x: g.x, z: g.z });
-        }
-        hit = g;
-        break;
-      }
-    }
-    if (!hit) {
-      const ped = peds.hitByShot({ x: playerX, z: playerZ }, { x: dirX, z: dirZ }, 2.3);
-      if (ped) {
-        onEvent('pedPunched', { x: ped.x, z: ped.z });
-        return 'ped';
-      }
-    }
-    return hit ? 'gang' : 'miss';
-  }
-
-  function damagePlayer(amount) {
-    health = Math.max(0, health - amount);
-    lastDamageAt = time;
-    if (health <= 0) onEvent('wasted', {});
-  }
-
-  function update(dt, playerX, playerZ, playerInCar) {
-    time += dt;
-    shootCd = Math.max(0, shootCd - dt);
-    punchCd = Math.max(0, punchCd - dt);
-    if (reloading > 0) {
-      reloading -= dt;
-      if (reloading <= 0) ammo = 12;
-    }
-    if (time - lastDamageAt > 5 && health > 0 && health < 100) {
-      health = Math.min(100, health + 6 * dt);
-    }
-    for (const g of gang) {
-      if (g.down) continue;
-      const dx = playerX - g.x;
-      const dz = playerZ - g.z;
+      const dx = ped.x - player.x;
+      const dz = ped.z - player.z;
       const d = Math.hypot(dx, dz) || 1;
-      g.heading = Math.atan2(dx, dz);
-      g.attackCd -= dt;
-      if (d > 1.9) {
-        g.x += (dx / d) * g.speed * dt;
-        g.z += (dz / d) * g.speed * dt;
-        g.phase += dt * 8;
-        g.legL.rotation.x = Math.sin(g.phase) * 0.5;
-        g.legR.rotation.x = -Math.sin(g.phase) * 0.5;
-      } else if (g.attackCd <= 0 && !playerInCar) {
-        g.attackCd = 0.9;
-        damagePlayer(10);
-        audio.punch();
-        fx.burst(playerX, 1.4, playerZ, 0xff4040, 6, 2);
+      if ((dx * fx + dz * fz) / d > 0.4) {
+        ctx.peds.kill(ped);
+        ctx.effects?.puff(ped.x, 1, ped.z);
+        ctx.wanted.onKillPed();
+        return;
       }
-      g.mesh.position.set(g.x, 0, g.z);
-      g.mesh.rotation.y = g.heading;
+    }
+    // then enemies
+    for (const e of enemies) {
+      if (e.dead) continue;
+      const dx = e.x - player.x;
+      const dz = e.z - player.z;
+      const d = Math.hypot(dx, dz) || 1;
+      if (d < range && (dx * fx + dz * fz) / d > 0.4) {
+        hurtEnemy(e, PLAYER.punchDamage);
+        return;
+      }
+    }
+  }
+
+  function makeEnemyMesh() {
+    const group = new THREE.Group();
+    const shirt = new THREE.MeshLambertMaterial({ color: 0xc22a3a });
+    const pants = new THREE.MeshLambertMaterial({ color: 0x1a1a22 });
+    const skin = new THREE.MeshLambertMaterial({ color: 0xd8a06a });
+    const legs = new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.82, 0.28), pants);
+    legs.position.y = 0.41;
+    group.add(legs);
+    const torso = new THREE.Mesh(new THREE.BoxGeometry(0.58, 0.64, 0.34), shirt);
+    torso.position.y = 1.14;
+    group.add(torso);
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.25, 10, 8), skin);
+    head.position.y = 1.66;
+    group.add(head);
+    const gun = new THREE.Mesh(
+      new THREE.BoxGeometry(0.09, 0.14, 0.34),
+      new THREE.MeshLambertMaterial({ color: 0x181818 }),
+    );
+    gun.position.set(0.36, 1.0, 0.2);
+    group.add(gun);
+    return group;
+  }
+
+  function spawnEnemy(x, z, health = 60) {
+    const mesh = makeEnemyMesh();
+    mesh.position.set(x, 0, z);
+    scene.add(mesh);
+    const enemy = { mesh, x, z, health, dead: false, shootTimer: 1 + Math.random(), speed: 3.4 };
+    enemies.push(enemy);
+    return enemy;
+  }
+
+  function hurtEnemy(enemy, damage) {
+    if (enemy.dead) return;
+    enemy.health -= damage;
+    ctx.effects?.puff(enemy.x, 1.2, enemy.z);
+    if (enemy.health <= 0) {
+      enemy.dead = true;
+      enemy.mesh.rotation.x = -Math.PI / 2;
+      enemy.mesh.position.y = 0.25;
+      ctx.onEnemyKilled?.(enemy);
+    }
+  }
+
+  function clearEnemies() {
+    for (const e of enemies) scene.remove(e.mesh);
+    enemies.length = 0;
+  }
+
+  function update(dt) {
+    // bullets
+    for (let i = bullets.length - 1; i >= 0; i--) {
+      const b = bullets[i];
+      b.life -= dt;
+      b.x += b.dx * BULLET_SPEED * dt;
+      b.y += b.dy * BULLET_SPEED * dt;
+      b.z += b.dz * BULLET_SPEED * dt;
+      b.mesh.position.set(b.x, b.y, b.z);
+      let dead = b.life <= 0 || b.y < 0;
+      if (!dead && pointInBoxes(b.x, b.z, ctx.colliders)) {
+        ctx.effects?.spark(b.x, b.y, b.z);
+        dead = true;
+      }
+      if (!dead && b.owner === 'player') {
+        const ped = ctx.peds.nearest(b.x, b.z, 1.1);
+        if (ped) {
+          ctx.peds.kill(ped);
+          ctx.effects?.puff(ped.x, 1, ped.z);
+          ctx.wanted.onKillPed();
+          dead = true;
+        }
+        if (!dead) {
+          for (const e of enemies) {
+            if (e.dead) continue;
+            if (Math.hypot(e.x - b.x, e.z - b.z) < 1.1 && b.y > 0.3 && b.y < 2) {
+              hurtEnemy(e, b.damage);
+              dead = true;
+              break;
+            }
+          }
+        }
+      }
+      if (!dead && b.owner === 'enemy') {
+        const p = ctx.player;
+        if (!p.inCar && Math.hypot(p.x - b.x, p.z - b.z) < 0.9 && b.y > 0.3 && b.y < 2) {
+          const died = p.damage(b.damage);
+          ctx.effects?.puff(p.x, 1.2, p.z);
+          ctx.hud?.flashDamage();
+          if (died) ctx.onPlayerDown?.();
+          dead = true;
+        }
+      }
+      if (dead) {
+        scene.remove(b.mesh);
+        bullets.splice(i, 1);
+      }
+    }
+    // enemy AI: close in and shoot
+    const p = ctx.player;
+    for (const e of enemies) {
+      if (e.dead) continue;
+      const dx = p.x - e.x;
+      const dz = p.z - e.z;
+      const dist = Math.hypot(dx, dz);
+      if (dist > 6 && dist < 60) {
+        const nx = e.x + (dx / dist) * e.speed * dt;
+        const nz = e.z + (dz / dist) * e.speed * dt;
+        const probe = { x: nx, z: nz };
+        if (!pointInBoxes(nx, nz, ctx.colliders)) {
+          e.x = nx;
+          e.z = nz;
+        }
+        e.mesh.rotation.y = Math.atan2(dx, dz);
+      }
+      e.shootTimer -= dt;
+      if (dist < 45 && e.shootTimer <= 0) {
+        e.shootTimer = 1.3 + Math.random() * 0.9;
+        shootFromEnemy(e);
+      }
+      e.mesh.position.set(e.x, 0, e.z);
     }
   }
 
   return {
-    gang,
-    get health() { return health; },
-    get ammo() { return ammo; },
-    get reloading() { return reloading > 0; },
-    set onEvent(fn) { onEvent = fn; },
-    spawnGang,
-    shoot,
+    bullets,
+    enemies,
+    shootFromPlayer,
+    shootFromEnemy,
     punch,
-    damagePlayer,
-    reload() {
-      if (ammo < 12 && reloading <= 0) {
-        reloading = 1.2;
-        audio.reload();
-      }
-    },
-    heal(amount) { health = clamp(health + amount, 0, 100); },
-    setHealth(value) { health = clamp(value, 0, 100); },
-    clearGang() {
-      while (gang.length) scene.remove(gang.pop().mesh);
-    },
+    spawnEnemy,
+    clearEnemies,
     update,
   };
 }

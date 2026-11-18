@@ -1,6 +1,7 @@
-// Solmar: a tiny seeded random number generator (mulberry32) and helpers.
-// The city, traffic and pedestrians all draw from seeded streams, so a shot
-// with a fixed seed always stages the same frame.
+// Solmar — tiny seeded random number generator.
+// The world is built from one seed so a screenshot run (?seed=N) rebuilds
+// the exact same city, traffic and pedestrians every time.
+
 export function mulberry32(seed) {
   let a = seed >>> 0;
   return function next() {
@@ -12,45 +13,34 @@ export function mulberry32(seed) {
   };
 }
 
-export function range(rng, min, max) {
-  return min + rng() * (max - min);
-}
-
-export function rangeInt(rng, min, max) {
-  return Math.floor(range(rng, min, max + 1));
-}
-
-export function pick(rng, array) {
-  return array[Math.floor(rng() * array.length)];
-}
-
-export function shuffle(rng, array) {
-  for (let i = array.length - 1; i > 0; i -= 1) {
-    const j = Math.floor(rng() * (i + 1));
-    const tmp = array[i];
-    array[i] = array[j];
-    array[j] = tmp;
-  }
-  return array;
-}
-
-export function clamp(value, min, max) {
-  return value < min ? min : value > max ? max : value;
-}
-
-export function lerp(a, b, t) {
-  return a + (b - a) * t;
-}
-
-export function angleLerp(a, b, t) {
-  let d = (b - a) % (Math.PI * 2);
-  if (d > Math.PI) d -= Math.PI * 2;
-  if (d < -Math.PI) d += Math.PI * 2;
-  return a + d * t;
-}
-
-export function dist2(ax, az, bx, bz) {
-  const dx = ax - bx;
-  const dz = az - bz;
-  return dx * dx + dz * dz;
+export function makeRng(seed) {
+  const next = mulberry32(seed);
+  return {
+    next,
+    // float in [a, b)
+    range(a, b) {
+      return a + next() * (b - a);
+    },
+    // integer in [a, b]
+    int(a, b) {
+      return a + Math.floor(next() * (b - a + 1));
+    },
+    pick(list) {
+      return list[Math.floor(next() * list.length)];
+    },
+    chance(p) {
+      return next() < p;
+    },
+    // Fisher-Yates shuffle, returns a new array
+    shuffle(list) {
+      const out = list.slice();
+      for (let i = out.length - 1; i > 0; i--) {
+        const j = Math.floor(next() * (i + 1));
+        const tmp = out[i];
+        out[i] = out[j];
+        out[j] = tmp;
+      }
+      return out;
+    },
+  };
 }

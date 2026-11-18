@@ -1,192 +1,214 @@
-// Solmar: the player on foot. A low-poly walker (Vic Maro) with a
-// third-person orbit camera: WASD moves relative to the camera, Shift runs,
-// Space jumps, the mouse orbits. The same rig becomes a chase camera when
-// the player is driving.
-import * as THREE from 'three';
-import { PLAYER } from './config.js';
-import { clamp, angleLerp } from './rng.js';
-import { collideCircle } from './collide.js';
+// Solmar — Vic Maro on foot: walk/run/jump, punch, pistol, and getting
+// in and out of cars. The camera yaw lives in main.js; this module only
+// moves the body relative to it.
 
-function createPlayerMesh() {
+import * as THREE from 'three';
+import { SPEED, PLAYER } from './config.js';
+import { ACT } from './input.js';
+import { resolveCircle } from './collide.js';
+
+function makeVicMesh() {
   const group = new THREE.Group();
-  const shirt = new THREE.MeshLambertMaterial({ color: 0x2ec4b6 });
-  const body = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.8, 0.34), shirt);
-  body.position.y = 1.05;
-  body.castShadow = true;
-  group.add(body);
-  const head = new THREE.Mesh(
-    new THREE.SphereGeometry(0.23, 12, 10),
-    new THREE.MeshLambertMaterial({ color: 0xe0ac69 }),
-  );
+  const jacket = new THREE.MeshLambertMaterial({ color: 0x8c2a2a });
+  const shirt = new THREE.MeshLambertMaterial({ color: 0xe8e8e8 });
+  const pants = new THREE.MeshLambertMaterial({ color: 0x2a2a34 });
+  const skin = new THREE.MeshLambertMaterial({ color: 0xe8b88a });
+  const legs = new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.82, 0.28), pants);
+  legs.position.y = 0.41;
+  group.add(legs);
+  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.58, 0.64, 0.34), jacket);
+  torso.position.y = 1.14;
+  group.add(torso);
+  const chest = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.4, 0.05), shirt);
+  chest.position.set(0, 1.16, 0.19);
+  group.add(chest);
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.25, 10, 8), skin);
   head.position.y = 1.66;
-  head.castShadow = true;
   group.add(head);
-  const hair = new THREE.Mesh(
-    new THREE.SphereGeometry(0.24, 12, 8, 0, Math.PI * 2, 0, Math.PI / 2),
-    new THREE.MeshLambertMaterial({ color: 0x2a1a0e }),
+  const armGeo = new THREE.BoxGeometry(0.13, 0.56, 0.13);
+  const armL = new THREE.Mesh(armGeo, jacket);
+  armL.position.set(-0.36, 1.12, 0);
+  const armR = new THREE.Mesh(armGeo, jacket);
+  armR.position.set(0.36, 1.12, 0);
+  group.add(armL);
+  group.add(armR);
+  // pistol, hidden until Vic draws it
+  const gun = new THREE.Mesh(
+    new THREE.BoxGeometry(0.09, 0.14, 0.34),
+    new THREE.MeshLambertMaterial({ color: 0x181818 }),
   );
-  hair.position.y = 1.7;
-  group.add(hair);
-  const legMat = new THREE.MeshLambertMaterial({ color: 0x2c3e50 });
-  const legL = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.72, 0.22), legMat);
-  legL.position.set(-0.15, 0.36, 0);
-  const legR = legL.clone();
-  legR.position.set(0.15, 0.36, 0);
-  group.add(legL, legR);
-  const armMat = new THREE.MeshLambertMaterial({ color: 0x2ec4b6 });
-  const armL = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.66, 0.18), armMat);
-  armL.position.set(-0.42, 1.05, 0);
-  const armR = armL.clone();
-  armR.position.set(0.42, 1.05, 0);
-  group.add(armL, armR);
-  return { group, legL, legR, armL, armR };
+  gun.position.set(0.36, 0.82, 0.22);
+  gun.visible = false;
+  group.add(gun);
+  return { group, armL, armR, gun };
 }
 
-export function createPlayer(scene, start) {
-  const { group, legL, legR, armL, armR } = createPlayerMesh();
-  group.position.set(start.x, 0, start.z);
+export function createPlayer(scene) {
+  const { group, armL, armR, gun } = makeVicMesh();
   scene.add(group);
-  let x = start.x;
-  let z = start.z;
-  let y = 0;
-  let vy = 0;
-  let heading = start.heading || 0;
-  let camYaw = start.heading || 0;
-  let camPitch = 0.32;
-  let onGround = true;
-  let walkPhase = 0;
-  let speedNow = 0;
-  const camPos = new THREE.Vector3();
-  const camTarget = new THREE.Vector3();
-
-  return {
+  const player = {
     mesh: group,
-    get x() { return x; },
-    get z() { return z; },
-    get y() { return y; },
-    get heading() { return heading; },
-    get camYaw() { return camYaw; },
-    get speed() { return speedNow; },
-    get onGround() { return onGround; },
-    teleport(nx, nz, nHeading) {
-      x = nx;
-      z = nz;
-      y = 0;
-      vy = 0;
-      if (nHeading !== undefined) {
-        heading = nHeading;
-        camYaw = nHeading;
-      }
-      group.position.set(x, 0, z);
-    },
-    setHeading(h) { heading = h; camYaw = h; },
-    // ride in a car: the player sits where the car is, but the mouse look
-    // (camYaw) is theirs — teleport would reset it every frame
-    followCar(nx, nz, nHeading) {
-      x = nx;
-      z = nz;
-      y = 0;
-      vy = 0;
-      heading = nHeading;
-      group.position.set(x, 0, z);
-      group.rotation.y = heading;
-    },
-    applyLook(look) {
-      camYaw -= look.dx * 0.0026;
-      camPitch = clamp(camPitch + look.dy * 0.0022, -0.15, 1.1);
-    },
-    update(dt, input, colliders, worldHalf, frozen, actions) {
-      this.applyLook(input.takeLook());
-      if (frozen) return { speed: 0 };
-      const fwd = (input.held.forward ? 1 : 0) - (input.held.back ? 1 : 0);
-      const strafe = (input.held.right ? 1 : 0) - (input.held.left ? 1 : 0);
-      const run = input.held.run;
-      const speed = run ? PLAYER.runSpeed : PLAYER.walkSpeed;
-      const sin = Math.sin(camYaw);
-      const cos = Math.cos(camYaw);
-      let mx = sin * fwd + cos * strafe;
-      let mz = cos * fwd - sin * strafe;
-      const len = Math.hypot(mx, mz);
-      if (len > 0.01) {
-        mx /= len;
-        mz /= len;
-        const targetHeading = Math.atan2(mx, mz);
-        heading = angleLerp(heading, targetHeading, clamp(12 * dt, 0, 1));
-      }
-      const ox = x;
-      const oz = z;
-      x += mx * speed * (len > 0.01 ? 1 : 0) * dt;
-      z += mz * speed * (len > 0.01 ? 1 : 0) * dt;
-      if (collideCircle({ x, z }, PLAYER.radius, colliders, worldHalf)) {
-        // slide: try the x-only move, then the z-only move, else stay put
-        if (!collideCircle({ x, z: oz }, PLAYER.radius, colliders, worldHalf)) {
-          z = oz;
-        } else if (!collideCircle({ x: ox, z }, PLAYER.radius, colliders, worldHalf)) {
-          x = ox;
-        } else {
-          x = ox;
-          z = oz;
-        }
-      }
-      speedNow = len > 0.01 ? speed : 0;
-      // jump + gravity
-      if ((actions & 8) && onGround) { // ACT.JUMP
-        vy = PLAYER.jumpSpeed;
-        onGround = false;
-      }
-      if (!onGround) {
-        vy -= 22 * dt;
-        y += vy * dt;
-        if (y <= 0) { y = 0; vy = 0; onGround = true; }
-      }
-      walkPhase += dt * speedNow * 1.6;
-      const swing = Math.sin(walkPhase) * (speedNow > 0.1 ? 0.55 : 0);
-      legL.rotation.x = swing;
-      legR.rotation.x = -swing;
-      armL.rotation.x = -swing * 0.7;
-      armR.rotation.x = swing * 0.7;
-      group.position.set(x, y, z);
-      group.rotation.y = heading;
-      return { speed: speedNow, actions };
-    },
-    updateCamera(dt, camera, mode, carState, shake) {
-      const dist = mode === 'car' ? 8 : 7.2;
-      const height = mode === 'car' ? 3.2 : 3.4;
-      let yaw = camYaw;
-      let tx;
-      let tz;
-      let ty;
-      if (mode === 'car' && carState) {
-        // chase camera: ease back behind the car (yaw = heading puts the
-        // camera opposite the nose), slightly to one side for a 3/4 view
-        // that shows the car's flank, not just its rear plate
-        camYaw = angleLerp(camYaw, carState.heading + 0.35, clamp(1.8 * dt, 0, 1));
-        yaw = camYaw;
-        tx = carState.x;
-        tz = carState.z;
-        ty = 1.4;
-      } else {
-        tx = x;
-        tz = z;
-        ty = 1.5 + y;
-      }
-      const pitch = mode === 'car' ? 0.24 : camPitch;
-      const cx = tx - Math.sin(yaw) * Math.cos(pitch) * dist;
-      const cz = tz - Math.cos(yaw) * Math.cos(pitch) * dist;
-      const cy = ty + Math.sin(pitch) * dist + (mode === 'car' ? 0.8 : 0);
-      const target = new THREE.Vector3(cx, Math.max(1.2, cy), cz);
-      camPos.lerp(target, clamp(10 * dt, 0, 1));
-      camTarget.set(tx, ty, tz);
-      camera.position.copy(camPos);
-      if (shake) {
-        camera.position.x += shake.x;
-        camera.position.y += shake.y;
-      }
-      camera.lookAt(camTarget);
-    },
-    snapCamera(camera, mode, carState) {
-      camPos.set(0, -999, 0); // force next updateCamera to snap
-      this.updateCamera(1, camera, mode, carState, null);
-    },
+    armL,
+    armR,
+    gun,
+    x: 0,
+    y: 0,
+    z: 0,
+    vy: 0,
+    heading: 0, // facing, radians; forward = (sin h, cos h)
+    health: PLAYER.health,
+    cash: 40,
+    ammo: PLAYER.pistolAmmoStart,
+    weapon: 'fists', // or 'pistol'
+    inCar: false,
+    car: null,
+    shootCooldown: 0,
+    walkPhase: 0,
+    dead: false,
   };
+
+  function place(x, z, heading = 0) {
+    player.x = x;
+    player.z = z;
+    player.y = 0;
+    player.vy = 0;
+    player.heading = heading;
+    player.mesh.position.set(x, 0, z);
+    player.mesh.rotation.y = heading;
+  }
+
+  // On-foot step. camYaw is the camera's yaw; forward = (sin, cos).
+  function updateFoot(dt, actions, input, camYaw, ctx) {
+    if (player.dead) return;
+    const held = input.held;
+    const fx = Math.sin(camYaw);
+    const fz = Math.cos(camYaw);
+    const rx = -Math.cos(camYaw);
+    const rz = Math.sin(camYaw);
+    let mx = 0;
+    let mz = 0;
+    if (held.forward) {
+      mx += fx;
+      mz += fz;
+    }
+    if (held.back) {
+      mx -= fx;
+      mz -= fz;
+    }
+    if (held.right) {
+      mx += rx;
+      mz += rz;
+    }
+    if (held.left) {
+      mx -= rx;
+      mz -= rz;
+    }
+    const moving = mx !== 0 || mz !== 0;
+    const speed = held.run ? SPEED.run : SPEED.walk;
+    if (moving) {
+      const len = Math.hypot(mx, mz);
+      mx /= len;
+      mz /= len;
+      player.x += mx * speed * dt;
+      player.z += mz * speed * dt;
+      const wantHeading = Math.atan2(mx, mz);
+      let diff = wantHeading - player.heading;
+      while (diff > Math.PI) diff -= Math.PI * 2;
+      while (diff < -Math.PI) diff += Math.PI * 2;
+      player.heading += Math.max(-10 * dt, Math.min(10 * dt, diff));
+      player.walkPhase += dt * speed * 2.2;
+    }
+    // gravity + jump
+    if (actions & ACT.JUMP && player.y <= 0.01) {
+      player.vy = PLAYER.jumpSpeed;
+      ctx.audio?.jump();
+    }
+    player.vy -= PLAYER.gravity * dt;
+    player.y += player.vy * dt;
+    if (player.y < 0) {
+      player.y = 0;
+      player.vy = 0;
+    }
+    // buildings block the walk
+    const probe = { x: player.x, z: player.z };
+    if (resolveCircle(probe, PLAYER.radius, ctx.colliders)) {
+      player.x = probe.x;
+      player.z = probe.z;
+    }
+    // weapon switch
+    if (actions & ACT.WEAPON) {
+      player.weapon = player.weapon === 'fists' ? 'pistol' : 'fists';
+      player.gun.visible = player.weapon === 'pistol';
+      ctx.audio?.click();
+    }
+    // punch
+    if (actions & ACT.PUNCH) {
+      ctx.combat.punch(player);
+      ctx.audio?.punch();
+    }
+    // shooting: one-shot press or held mouse
+    player.shootCooldown -= dt;
+    const wantShoot = (actions & ACT.SHOOT) !== 0 || input.shooting;
+    if (wantShoot && player.weapon === 'pistol' && player.shootCooldown <= 0 && player.ammo > 0) {
+      player.shootCooldown = 0.22;
+      player.ammo -= 1;
+      // face where the camera looks while shooting; the shot flies along
+      // the camera's view direction (ctx.shootDir, kept by main.js)
+      player.heading = camYaw;
+      ctx.combat.shootFromPlayer(player, ctx.shootDir);
+      ctx.audio?.shot();
+      ctx.effects?.muzzle(player.x, 1.4, player.z, camYaw);
+    } else if (wantShoot && player.weapon === 'fists') {
+      ctx.combat.punch(player);
+    }
+    // mesh sync + walk swing
+    player.mesh.position.set(player.x, player.y, player.z);
+    player.mesh.rotation.y = player.heading;
+    const swing = moving ? Math.sin(player.walkPhase) * 0.55 : 0;
+    player.armL.rotation.x = swing;
+    player.armR.rotation.x = -swing;
+  }
+
+  function enterCar(car) {
+    player.inCar = true;
+    player.car = car;
+    player.mesh.visible = false; // Vic sits inside the car; the car stays in the scene
+  }
+
+  function exitCar() {
+    const car = player.car;
+    player.inCar = false;
+    player.car = null;
+    player.mesh.visible = true;
+    // step out on the driver's side
+    const sideX = car.x - Math.cos(car.heading) * 2.4;
+    const sideZ = car.z + Math.sin(car.heading) * 2.4;
+    place(sideX, sideZ, car.heading);
+  }
+
+  function damage(amount) {
+    if (player.dead) return false;
+    player.health -= amount;
+    if (player.health <= 0) {
+      player.health = 0;
+      player.dead = true;
+      return true;
+    }
+    return false;
+  }
+
+  function healFull() {
+    player.health = PLAYER.health;
+    player.dead = false;
+  }
+
+  // Attach the methods to the live state object (never spread it: the
+  // fields must stay live for the HUD, the minimap and the playtest).
+  player.place = place;
+  player.updateFoot = updateFoot;
+  player.enterCar = enterCar;
+  player.exitCar = exitCar;
+  player.damage = damage;
+  player.healFull = healFull;
+  return player;
 }

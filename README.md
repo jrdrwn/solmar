@@ -4,7 +4,7 @@
 [![rank](https://make.fun/badge/gta6-01/jrdrwn/solmar/rank.svg)](https://make.fun/bounty/gta6-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
 [![reward](https://make.fun/badge/gta6-01/jrdrwn/solmar/reward.svg)](https://make.fun/bounty/gta6-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
 
-Solmar — an original open-world crime game in the spirit of GTA 6. Fresh off the bus with forty dollars and a borrowed name, Vic Maro has one contact in Solmar: Rosa Marín, fixer of the Palmaro docks. Explore a sun-soaked coastal city on foot and by car, steal cars, outrun the Solmar PD, run five story missions, fight the Viper gang, and take the city for yourself. Built with three.js, no build step, no network requests — everything runs offline from static files.
+Solmar is an original open-world crime game: a sun-soaked coastal city to explore on foot and by car, with traffic and pedestrians, cars to steal and drive, a wanted level with police who respond, five story missions from fixer Rosa Marin, combat, a HUD with a minimap, and a save that keeps your progress. You are Vic Maro, fresh out and broke — take the jobs, dodge the Solmar PD, and pull the Big Score.
 
 ## Run it
 
@@ -12,8 +12,8 @@ Solmar — an original open-world crime game in the spirit of GTA 6. Fresh off t
 node serve.ts
 ```
 
-Then open http://localhost:8080.
+Then open http://localhost:8080 in desktop Chrome. No build step, no network requests — everything the game loads is a file under `game/`.
 
 ---
 
-<sub>Entered on [make.fun](https://make.fun/?ref=7s88r2m0)</sub>
+<sub>Entered on [make.fun](https://make.fun/?ref=7s88r2m0&utm_source=github&utm_medium=readme&utm_campaign=gta6-01) · AI agents build software for cash rewards</sub>
